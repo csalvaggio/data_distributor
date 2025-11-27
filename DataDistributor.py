@@ -1,10 +1,10 @@
 import secrets
 import string
 import requests
+import urllib3
 
 from dataclasses import dataclass
 from pathlib import Path
-from urllib3.exceptions import InsecureRequestWarning
 
 
 CHARSET = string.ascii_letters + string.digits + "-_"
@@ -24,24 +24,32 @@ class DataDistributor:
     ----------
     base_directory : Path | str
         Root directory under which all slug-based data directories are created.
+        Normalized to a `pathlib.Path` during initialization.
+
     base_url : str
         Base URL corresponding to `base_directory` for constructing public
-        URLs for each slug.
+        URLs for each slug. Any trailing slash is removed during initialization.
+
     index_template_url : str or None, optional
-        URL of an HTML template used to generate `index.html`. If None, a
-        simple default HTML stub is generated instead.
+        URL of an HTML template used to generate `index.html`. If provided,
+        it is normalized by stripping any trailing slash. If None, a simple
+        fallback HTML stub is used during index creation.
+
     slug_length : int, optional
         Default length of generated slugs. Used when `length` is not provided
         to `make_slug` or `create`.
+
     suppress_insecure_warning : bool, optional
-        If True, suppresses insecure request warnings when SSL verification
-        is disabled for HTTP requests.
+        If True, disables `urllib3`'s `InsecureRequestWarning` globally in
+        the current process. This is typically used when other code will make
+        HTTPS requests with `verify=False`. It does not modify SSL verification
+        behavior itself.
     """
 
     base_directory: Path | str
     base_url: str
     index_template_url: str | None = None
-    slug_length: int = 24
+    slug_length: int = 32
     suppress_insecure_warning: bool = False
 
     def __post_init__(self) -> None:
@@ -50,27 +58,31 @@ class DataDistributor:
 
         This method ensures that `base_directory` is a `Path` instance and
         strips any trailing slash from `base_url` and `index_template_url`.
-        It also optionally suppresses insecure request warnings if
-        `suppress_insecure_warning` is True.
+        If `suppress_insecure_warning` is True, it disables
+        `urllib3`'s `InsecureRequestWarning` globally in the current process.
         """
-        # Normalize fields while keeping the dataclass frozen.
         object.__setattr__(self, "base_directory", Path(self.base_directory))
         object.__setattr__(self, "base_url", self.base_url.rstrip("/"))
+
         if self.index_template_url is not None:
             object.__setattr__(
                 self,
                 "index_template_url",
                 self.index_template_url.rstrip("/"),
             )
+
         if self.suppress_insecure_warning:
-            urllib3.disable_warnings(InsecureRequestWarning)
+            urllib3.disable_warnings(
+                urllib3.exceptions.InsecureRequestWarning
+            )
 
     def make_slug(self, length: int | None = None) -> str:
         """
         Generate a random alpha/numeric/symbol slug with URL-safe characters.
 
-        The slug is composed of ASCII letters and digits. If `length` is not
-        provided, the instance attribute `slug_length` is used.
+        The slug is composed of ASCII letters, digits, and valid symbols.
+        If `length` is not provided, the instance attribute `slug_length`
+        is used.
 
         Parameters
         ----------
@@ -130,8 +142,10 @@ class DataDistributor:
         """
         return f"{self.base_url}/{slug}"
 
-    def read_index_template(self,
-        verify: bool | str | None = None) -> str | None:
+    def read_index_template(
+        self,
+        verify: bool | str | None = None
+    ) -> str | None:
         """
         Retrieve the HTML template from `index_template_url`.
 
@@ -143,28 +157,29 @@ class DataDistributor:
         Parameters
         ----------
         verify : bool or str or None, optional
-            SSL certificate verification setting passed to ``requests.get``.
-            - If ``True`` (default), system CA certificates are used.
+            SSL certificate verification setting passed to ``requests.get``:
+            - If ``True``, system CA certificates are used.
             - If ``False``, SSL verification is disabled (insecure).
             - If a string, it is treated as a path to a CA bundle.
-            If ``None``, a default of ``True`` is applied.
+            - If ``None`` (the default), this method treats it as ``True``,
+              matching the default behavior of ``requests``.
 
         Returns
         -------
         str or None
-            The retrieved template HTML as a string if the request
-            succeeds; otherwise ``None``.
+            The template HTML as a string if successfully retrieved; otherwise
+            ``None``.
 
         Notes
         -----
-        A timeout of 5 seconds is used. All network and HTTP-related
+        A timeout of 5 seconds is used. All network- and HTTP-related
         exceptions are caught and result in ``None`` being returned.
         """
         if not self.index_template_url:
             return None
 
         if verify is None:
-            verify = True  # safer default
+            verify = True
 
         try:
             response = requests.get(
@@ -183,14 +198,15 @@ class DataDistributor:
         directory: Path,
         title: str | None = None,
         body_html: str | None = None,
+        verify: bool | str | None = None,
     ) -> Path:
         """
         Create an `index.html` file in the given directory.
 
-        If a remote index template is available and successfully retrieved,
-        that template is written as-is. Otherwise, a simple default HTML
-        stub is generated using the provided `title` and `body_html`
-        parameters.
+        If `index_template_url` is configured and a remote template is
+        successfully retrieved, that template is written as-is. Otherwise,
+        a simple fallback HTML stub is generated using the provided `title`
+        and `body_html` parameters.
 
         Parameters
         ----------
@@ -198,22 +214,25 @@ class DataDistributor:
             Directory in which `index.html` will be created.
         title : str or None, optional
             Text to use inside the `<title>` element of the fallback HTML.
-            If None, a default title `"Data"` is used.
+            Ignored if a remote template is successfully fetched.
         body_html : str or None, optional
-            HTML content to place inside the `<body>` element of the fallback
-            HTML. If None, a simple default placeholder message is used.
+            Content to insert into the `<body>` element of the fallback HTML.
+            Ignored if a remote template is successfully fetched.
+        verify : bool or str or None, optional
+            SSL certificate verification setting passed through to
+            `read_index_template`. If None, default rules of that method
+            apply (i.e., treated as verify=True).
 
         Returns
         -------
         pathlib.Path
             Path object pointing to the created `index.html` file.
         """
-        # Attempt template fetch
         html = None
-        if self.index_template_url:
-            html = self.read_index_template(verify=False)
 
-        # Fallback to a simple stub if no template is available
+        if self.index_template_url:
+            html = self.read_index_template(verify=verify)
+
         if html is None:
             title = title or "Data"
             body_html = body_html or (
@@ -233,7 +252,6 @@ class DataDistributor:
 </html>
 """
 
-        # Write content to index file
         index_path = directory / "index.html"
         index_path.write_text(html, encoding="utf-8")
         return index_path
@@ -249,9 +267,9 @@ class DataDistributor:
         """
         Create a new data distribution.
 
-        This method generates a unique slug, creates the associated data
-        directory, optionally writes an `index.html` file into that directory,
-        and returns the slug, directory path, and public URL.
+        This method generates a random slug, creates the associated data
+        directory, optionally writes an index file, and returns the slug,
+        the directory path, and the public URL.
 
         Parameters
         ----------
@@ -259,25 +277,17 @@ class DataDistributor:
             Optional override for the slug length. If None, `self.slug_length`
             is used.
         with_index : bool, optional
-            If True, an `index.html` is created in the new directory using
-            `write_index`. Defaults to False.
+            If True, an `index.html` is created via `write_index`.
         index_title : str or None, optional
-            Optional title to pass to `write_index` for the fallback template.
+            Title for the fallback `index.html` stub (used only if no remote
+            template is fetched).
         index_body_html : str or None, optional
-            Optional body HTML to pass to `write_index` for the fallback
-            template.
+            Body HTML for the fallback `index.html` stub.
 
         Returns
         -------
-        tuple of (str, pathlib.Path, str)
-            A tuple containing:
-
-            - slug : str
-                The generated slug.
-            - path : pathlib.Path
-                Path to the created data directory.
-            - url : str
-                Public URL corresponding to the created slug.
+        tuple[str, pathlib.Path, str]
+            (slug, path, url)
         """
         slug = self.make_slug(length)
         path = self.create_data_dir(slug)
@@ -292,36 +302,39 @@ class DataDistributor:
         self,
         slug: str,
         timeout: float = 3.0,
-        verify: bool | str = True
+        verify: bool | str | None = None
     ) -> bool:
         """
         Check whether the URL corresponding to a slug is reachable.
 
-        The method first attempts an HTTP HEAD request for efficiency. If the
-        server does not support HEAD or an error occurs, it falls back to an
-        HTTP GET request. A response is considered successful if its status
-        code is less than 400.
+        The method first tries an HTTP HEAD request. If this fails or is not
+        supported, it falls back to an HTTP GET request. A response is
+        considered successful if its status code is less than 400.
 
         Parameters
         ----------
         slug : str
-            The slug whose URL should be tested.
+            The slug whose URL should be checked.
         timeout : float, optional
-            Timeout in seconds for the HTTP requests. Defaults to 3.0.
-        verify : bool or str, optional
-            SSL certificate verification setting. Pass True to use system
-            defaults, False to disable verification, or a path to a CA bundle.
-            Defaults to True.
+            Timeout in seconds for the HTTP requests. Default is 3.0.
+        verify : bool or str or None, optional
+            SSL certificate verification setting:
+            - If ``True``, system CA certificates are used.
+            - If ``False``, SSL verification is disabled (insecure).
+            - If a string, it must be a path to a CA bundle file.
+            - If ``None`` (the default), this method treats it as ``True``,
+              matching the default behavior of `requests`.
 
         Returns
         -------
         bool
-            True if the URL responds with a status code < 400, otherwise
-            False.
+            True if the URL returns an HTTP status < 400, else False.
         """
         url = self.create_data_url(slug)
 
-        # Try HEAD first
+        if verify is None:
+            verify = True
+
         try:
             r = requests.head(
                 url,
@@ -334,17 +347,92 @@ class DataDistributor:
         except requests.RequestException:
             pass
 
-        # Fallback to GET
         try:
-            r = requests.get(
+            with requests.get(
                 url,
                 stream=True,
                 timeout=timeout,
                 verify=verify
-            )
-            return r.status_code < 400
+            ) as r:
+                return r.status_code < 400
         except requests.RequestException:
             return False
+
+
+def create_data_distribution(
+        base_directory: Path | str,
+        base_url: str,
+        *,
+        index_template_url: str | None = None,
+        slug_length: int = 32,
+        suppress_insecure_warning: bool = False,
+        with_index: bool = False,
+        index_title: str | None = None,
+        index_body_html: str | None = None,
+    ) -> tuple[DataDistributor, str, Path, str]:
+    """
+    Convenience factory to create a DataDistributor and a new data distribution.
+
+    This function instantiates a `DataDistributor` with the provided parameters,
+    creates a new slug-based data directory (optionally with an `index.html`),
+    and returns both the distributor and the details of the created distribution.
+
+    Parameters
+    ----------
+    base_directory : Path or str
+        Root directory under which all slug-based data directories are created.
+    base_url : str
+        Base URL corresponding to `base_directory`.
+    index_template_url : str or None, optional
+        Optional URL of an HTML template used to generate `index.html`.
+        If provided, it may be fetched via HTTPS.
+    slug_length : int, optional
+        Default slug length for the created `DataDistributor`.
+    suppress_insecure_warning : bool, optional
+        If True, disables `urllib3`'s `InsecureRequestWarning` globally in the
+        current process. This is usually used when callers intend to perform
+        HTTPS requests with `verify=False`.
+    with_index : bool, optional
+        If True, an `index.html` file is created in the new directory.
+    index_title : str or None, optional
+        Title for the fallback `index.html` stub (used only if no remote
+        template is available).
+    index_body_html : str or None, optional
+        Body content for the fallback `index.html` stub.
+
+    Returns
+    -------
+    distributor : DataDistributor
+        The constructed distributor instance.
+    slug : str
+        The generated slug.
+    path : pathlib.Path
+        Path to the created slug directory.
+    url : str
+        Public URL corresponding to the created slug.
+
+    Notes
+    -----
+    This helper does not modify SSL verification behavior. Any network requests
+    (template retrieval, URL checks) follow the distributor's documented `verify`
+    rules unless explicitly overridden by callers.
+    """
+    distributor = DataDistributor(
+        base_directory=base_directory,
+        base_url=base_url,
+        index_template_url=index_template_url,
+        slug_length=slug_length,
+        suppress_insecure_warning=suppress_insecure_warning
+    )
+
+    slug, path, url = distributor.create(
+        with_index=with_index,
+        index_title=index_title,
+        index_body_html=index_body_html,
+    )
+
+    return distributor, slug, path, url
+
 
 
 if __name__ == "__main__":
@@ -354,9 +442,9 @@ if __name__ == "__main__":
         "https://home.cis.rit.edu/~cnspci/tmp/imagine_rit/template/index.html"
 
     distributor = DataDistributor(
-        base_directory,
-        base_url,
-        index_template_url,
+        base_directory=base_directory,
+        base_url=base_url,
+        index_template_url=index_template_url,
         suppress_insecure_warning=False
     )
 
