@@ -1,4 +1,4 @@
-# data_distributor - A Web-Visible Data Distribution Module
+# data_distributor - Web-Visible Data Distribution Module
 
 Create random slug-based directories for web-visible data distributions.
  
