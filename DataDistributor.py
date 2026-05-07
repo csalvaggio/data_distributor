@@ -293,7 +293,10 @@ class DataDistributor:
         path = self.create_data_dir(slug)
 
         if with_index:
-            self.write_index(path, index_title, index_body_html)
+            # If/when the CIS SSL certificate gets fixed, go back to the
+            # original statement with verification being conducted (default)
+            #self.write_index(path, index_title, index_body_html)
+            self.write_index(path, index_title, index_body_html, verify=False)
 
         url = self.create_data_url(slug)
         return slug, path, url
